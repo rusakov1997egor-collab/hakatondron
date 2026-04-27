@@ -120,6 +120,7 @@ export default function App() {
     hoverTimer: 0
   });
 
+  const ws = useRef(null);
   // --- СОСТОЯНИЕ КЛИЕНТСКОГО ПРИЛОЖЕНИЯ ---
   const [cart, setCart] = useState([]);
   const [selectedHouse, setSelectedHouse] = useState(HOUSES[0]);
@@ -140,143 +141,49 @@ export default function App() {
       items: [...cart],
       weight: cartWeight,
       deliveryType: deliveryType,
-      status: 'pending', // pending, in_progress, delivered
+      status: 'pending',
       assignedTo: isOverweight ? 'truck' : 'drone'
     };
-    setOrders(prev => [...prev, newOrder]);
-    setCart([]);
     
-    // Показываем уведомление и не перекидываем в дашборд сразу, чтобы можно было набрать очередь
+    // Отправляем заказ на бэкенд
+    if (ws.current && ws.current.readyState === WebSocket.OPEN) {
+      ws.current.send(JSON.stringify({ type: 'NEW_ORDER', order: newOrder }));
+    }
+    
+    setCart([]);
     setShowToast(true);
     setTimeout(() => setShowToast(false), 3000);
   };
 
   // --- ФИЗИЧЕСКИЙ ДВИЖОК / СИМУЛЯТОР (ЦИФРОВОЙ ДВОЙНИК) ---
+  // --- ИНТЕГРАЦИЯ С БЭКЕНДОМ (СЛУШАЕМ СЕРВЕР) ---
   useEffect(() => {
-    if (!isDeliveryActive) return; // Симуляция на паузе, пока не нажата кнопка в дашборде
-
-    const tickRate = 50; // 20 fps для плавности
+    // Подключаемся к FastAPI
+    ws.current = new WebSocket('ws://localhost:8000/ws/telemetry');
     
-    const interval = setInterval(() => {
-      // 1. Движение грузовика (Ездит вверх-вниз по оси Y от 24 до 176)
-      setTruck(prev => {
-        let newY = prev.y + (TRUCK_SPEED * prev.direction);
-        let newDir = prev.direction;
-        if (newY >= 176) { newY = 176; newDir = -1; } // ПВЗ на Севере
-        if (newY <= 24) { newY = 24; newDir = 1; }   // Хаб на Юге
-        return { ...prev, y: newY, direction: newDir };
-      });
-
-      // 2. Логика Дрона (State Machine)
-      setDrone(prevDrone => {
-        let { x, y, status, battery, targetOrder, hoverTimer } = prevDrone;
-        
-        // Поиск нового заказа, если дрон на базе
-        if (status === 'DOCKED') {
-          // Зарядка
-          if (battery < 100) battery = Math.min(100, battery + 1);
-          
-          // Дрон физически на грузовике
-          x = truck.x;
-          y = truck.y;
-
-          const pendingDroneOrder = orders.find(o => o.status === 'pending' && o.assignedTo === 'drone');
-          if (pendingDroneOrder && battery > 30) {
-            targetOrder = pendingDroneOrder;
-            status = 'FLYING_OUT';
-            // Обновляем статус заказа
-            setOrders(os => os.map(o => o.id === pendingDroneOrder.id ? { ...o, status: 'in_progress' } : o));
-          }
-        } 
-        else if (status === 'FLYING_OUT' && targetOrder) {
-          // Летим к клиенту
-          const targetX = targetOrder.house.x;
-          const targetY = targetOrder.house.y;
-          const dist = getDistance(x, y, targetX, targetY);
-          
-          battery -= 0.1; // Разряд
-
-          if (dist < 2.0) { // Дистанция захвата цели увеличена под сетку 200x200
-            status = 'HOVERING';
-            hoverTimer = targetOrder.deliveryType === 'window' ? 60 : 30; // У окна зависает дольше для ArUco
-          } else {
-            // Движение (Интерполяция)
-            const angle = Math.atan2(targetY - y, targetX - x);
-            x += Math.cos(angle) * DRONE_SPEED;
-            y += Math.sin(angle) * DRONE_SPEED;
-          }
-        }
-        else if (status === 'HOVERING' && targetOrder) {
-          battery -= 0.05; // В режиме зависания разряд меньше
-          hoverTimer -= 1;
-          
-          if (hoverTimer <= 0) {
-            const completedOrderId = targetOrder.id;
-            
-            // Ищем следующий заказ в очереди, который назначен на дрона
-            const nextOrder = orders.find(o => o.status === 'pending' && o.assignedTo === 'drone' && o.id !== completedOrderId);
-
-            // МУЛЬТИ-ДОСТАВКА: Если есть следующий заказ и хватает батареи (> 40%)
-            if (nextOrder && battery > 40) {
-              status = 'FLYING_OUT';
-              targetOrder = nextOrder; // Берем новую цель
-              
-              setOrders(os => os.map(o => {
-                if (o.id === completedOrderId) return { ...o, status: 'delivered' };
-                if (o.id === nextOrder.id) return { ...o, status: 'in_progress' };
-                return o;
-              }));
-            } else {
-              // Возврат на движущийся грузовик, если батарея садится или заказов нет
-              status = 'RETURNING';
-              targetOrder = null;
-              
-              setOrders(os => os.map(o => o.id === completedOrderId ? { ...o, status: 'delivered' } : o));
-            }
-          }
-        }
-        else if (status === 'RETURNING' || status === 'EMERGENCY_ABORT') {
-          // Возврат на движущийся грузовик (Рандеву)
-          const dist = getDistance(x, y, truck.x, truck.y);
-          battery -= 0.15; // Возврат быстрее тратит батарею
-          
-          if (dist < 4.0) { // Дистанция посадки увеличена под сетку 200
-            status = 'DOCKED';
-          } else {
-            const angle = Math.atan2(truck.y - y, truck.x - x);
-            // Если Emergency - летим быстрее
-            const speedMultiplier = status === 'EMERGENCY_ABORT' ? 1.5 : 1;
-            x += Math.cos(angle) * DRONE_SPEED * speedMultiplier;
-            y += Math.sin(angle) * DRONE_SPEED * speedMultiplier;
-          }
-        }
-
-        return { x, y, status, battery, targetOrder, hoverTimer, eta: getDistance(x,y, truck.x, truck.y) / DRONE_SPEED };
-      });
+    ws.current.onmessage = (event) => {
+      const serverState = JSON.parse(event.data);
       
-      // Авто-завершение заказов грузовика (для симуляции)
-      setOrders(os => os.map(o => {
-         if(o.assignedTo === 'truck' && o.status === 'pending') {
-            // Если грузовик проезжает мимо дома
-            if (Math.abs(truck.y - o.house.y) < 10) return { ...o, status: 'delivered' };
-         }
-         return o;
-      }));
+      // Сервер диктует реальность, мы просто обновляем картинку
+      setTruck(serverState.truck);
+      setDrone(serverState.drone);
+      setOrders(serverState.orders);
+      setIsDeliveryActive(serverState.isDeliveryActive);
+    };
 
-    }, tickRate);
+    return () => {
+      if (ws.current) ws.current.close();
+    };
+  }, []);
 
-    return () => clearInterval(interval);
-  }, [truck.x, truck.y, truck.direction, orders, isDeliveryActive]); // Добавлен флаг isDeliveryActive
-
-  // --- ЭКСТРЕННОЕ ПРЕРЫВАНИЕ (СИМУЛЯЦИЯ HDI/ЖЕСТА) ---
+  // --- ЭКСТРЕННОЕ ПРЕРЫВАНИЕ (КНОПКА В UI) ---
   const triggerEmergency = () => {
-    if (drone.status === 'FLYING_OUT' || drone.status === 'HOVERING') {
-      setDrone(prev => ({ ...prev, status: 'EMERGENCY_ABORT', hoverTimer: 0 }));
-      if (drone.targetOrder) {
-        // Возвращаем заказ в очередь
-        setOrders(os => os.map(o => o.id === drone.targetOrder.id ? { ...o, status: 'pending' } : o));
-      }
-    }
+    // Отправляем API запрос на бэкенд (как если бы сработала камера Ильи)
+    fetch('http://localhost:8000/api/gesture', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ action: 'abort' })
+    }).catch(err => console.error("Ошибка:", err));
   };
 
   // --- РЕНДЕР: КЛИЕНТСКОЕ ПРИЛОЖЕНИЕ ---
@@ -648,7 +555,11 @@ export default function App() {
           <div className="flex justify-between items-center mb-3">
             <h2 className="text-sm font-bold text-slate-400 uppercase tracking-widest">Очередь (TSP-D)</h2>
             <button 
-              onClick={() => setIsDeliveryActive(!isDeliveryActive)}
+              onClick={() => {
+                if (ws.current && ws.current.readyState === WebSocket.OPEN) {
+                  ws.current.send(JSON.stringify({ type: 'TOGGLE_DELIVERY' }));
+                }
+              }}
               className={`px-4 py-1.5 rounded font-bold text-xs uppercase tracking-wide transition-all shadow-md ${
                 isDeliveryActive
                   ? 'bg-orange-600 hover:bg-orange-500 text-white shadow-[0_0_10px_rgba(234,88,12,0.4)]'
