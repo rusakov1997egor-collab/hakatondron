@@ -5,6 +5,7 @@ from collections import deque
 import mediapipe as mp
 from mediapipe.tasks import python
 from mediapipe.tasks.python import vision
+import requests
 
 
 class GestureReader:
@@ -188,3 +189,57 @@ class GestureReader:
         """Очистка."""
         if hasattr(self, 'detector'):
             self.detector.close()
+
+# ==========================================
+# ИНТЕГРАЦИЯ: ЗАПУСК КАМЕРЫ И СВЯЗЬ С СЕРВЕРОМ
+# ==========================================
+if __name__ == "__main__":
+    print("[Система] Инициализация веб-камеры...")
+    
+    # Открываем стандартную веб-камеру ноутбука (индекс 0)
+    cap = cv2.VideoCapture(0) 
+    reader = GestureReader()
+
+    print("[Система] Камера готова. Для выхода нажмите 'q' в окне видео.")
+
+    while cap.isOpened():
+        success, frame = cap.read()
+        if not success:
+            print("Не удалось получить кадр с веб-камеры.")
+            break
+
+        # Отражаем кадр зеркально (как в зеркале), чтобы было удобнее показывать жесты
+        frame = cv2.flip(frame, 1)
+
+        # Передаем кадр в алгоритм Ильи
+        processed_frame, is_gesture_detected = reader.process_frame(frame)
+
+        # --- ОТПРАВКА СИГНАЛА НА БЭКЕНД ---
+        if is_gesture_detected:
+            print("🎯 ЖЕСТ РАСПОЗНАН! Отправляем экстренный сигнал...")
+            try:
+                # Отправляем команду 'abort' (Экстренная отмена)
+                # Если хотите, чтобы жест означал подтверждение посадки, 
+                # поменяйте "abort" на "come_here"
+                res = requests.post(
+                    "http://localhost:8000/api/gesture",
+                    json={"action": "abort"},
+                    timeout=1
+                )
+                if res.status_code == 200:
+                    print("✅ Сервер принял команду: ДРОН ВОЗВРАЩАЕТСЯ!")
+            except requests.exceptions.ConnectionError:
+                print("❌ Ошибка: Сервер FastAPI не запущен или недоступен.")
+            except Exception as e:
+                print(f"❌ Неизвестная ошибка: {e}")
+
+        # Показываем окошко с видео
+        cv2.imshow('Drone HDI Camera', processed_frame)
+
+        # Выход по нажатию клавиши 'q'
+        if cv2.waitKey(1) & 0xFF == ord('q'):
+            break
+
+    # Очистка ресурсов при закрытии
+    cap.release()
+    cv2.destroyAllWindows()
