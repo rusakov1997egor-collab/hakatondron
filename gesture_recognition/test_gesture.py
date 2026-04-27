@@ -1,6 +1,7 @@
 import cv2
 import sys
-sys.path.append('src')
+import os
+sys.path.append(os.path.join(os.path.dirname(__file__), 'src'))
 from gesture_reader import GestureReader
 
 
