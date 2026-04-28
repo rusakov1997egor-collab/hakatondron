@@ -3,6 +3,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 import asyncio
 import math
+from .navigation import NavigationGrid, DroneNavigator
 
 app = FastAPI(
     title="Hybrid Logistics API",
@@ -12,11 +13,28 @@ app = FastAPI(
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"], 
+    allow_origins=["*"],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+# --- ПРЕПЯТСТВИЯ (ДОМА) ---
+HOUSES = [
+    {"x": 30, "y": 50, "width": 25, "height": 30},
+    {"x": 80, "y": 60, "width": 30, "height": 25},
+    {"x": 140, "y": 45, "width": 28, "height": 35},
+    {"x": 50, "y": 110, "width": 22, "height": 28},
+    {"x": 120, "y": 100, "width": 35, "height": 30},
+    {"x": 35, "y": 150, "width": 30, "height": 25},
+    {"x": 90, "y": 140, "width": 25, "height": 32},
+    {"x": 155, "y": 130, "width": 28, "height": 28},
+]
+
+# --- ИНИЦИАЛИЗАЦИЯ НАВИГАЦИОННОЙ СИСТЕМЫ ---
+nav_grid = NavigationGrid(width=200, height=200, cell_size=5)
+for house in HOUSES:
+    nav_grid.add_obstacle(house["x"], house["y"], house["width"], house["height"], safety_margin=8.0)
 
 # --- ГЛОБАЛЬНОЕ СОСТОЯНИЕ ---
 current_simulation_state = {
@@ -36,6 +54,11 @@ current_simulation_state = {
 class GestureRequest(BaseModel):
     action: str
 
+@app.get("/api/houses", tags=["Map"])
+async def get_houses():
+    """Получение списка домов (препятствий)"""
+    return {"houses": HOUSES}
+
 @app.post("/api/gesture", tags=["Computer Vision"])
 async def handle_gesture(gesture: GestureRequest):
     global current_simulation_state
@@ -48,6 +71,9 @@ async def handle_gesture(gesture: GestureRequest):
 async def drone_telemetry(websocket: WebSocket):
     await websocket.accept()
     global current_simulation_state
+
+    # Создаем навигатор для этой сессии
+    drone_navigator = DroneNavigator(nav_grid)
     
     async def receive_commands():
         try:
@@ -76,32 +102,39 @@ async def drone_telemetry(websocket: WebSocket):
 
                     # --- 2. ЛОГИКА ДРОНА ---
                     drone = state["drone"]
-                    
+
                     # Если дрон на базе — ищем для него заказ
                     if drone["status"] == "DOCKED":
                         drone["x"], drone["y"] = truck["x"], truck["y"]
+                        drone_navigator.clear()  # Очищаем старый маршрут
+
                         for order in reversed(state["orders"]):
                             if order["status"] == "pending" and order["assignedTo"] == "drone":
                                 order["status"] = "in_progress"
                                 drone["targetOrder"] = order
                                 drone["status"] = "FLYING_OUT"
+
+                                # РАСЧЕТ МАРШРУТА (один раз!)
+                                target = order["house"]
+                                start_pos = (drone["x"], drone["y"])
+                                goal_pos = (target["x"], target["y"])
+                                drone_navigator.set_destination(start_pos, goal_pos, speed=2.5)
                                 break
-                    
+
                     # Полет к клиенту
                     elif drone["status"] == "FLYING_OUT":
-                        target = drone["targetOrder"]["house"]
-                        dx, dy = target["x"] - drone["x"], target["y"] - drone["y"]
-                        dist = math.hypot(dx, dy)
-                        
-                        if dist < 2.0: # Достигли цели
+                        current_pos = (drone["x"], drone["y"])
+                        new_x, new_y, reached = drone_navigator.update_position(current_pos)
+
+                        drone["x"], drone["y"] = new_x, new_y
+
+                        if reached:
+                            target = drone["targetOrder"]["house"]
                             drone["x"], drone["y"] = target["x"], target["y"]
                             drone["status"] = "HOVERING"
                             # Если окно - ждем 5 сек (50 тиков), если крыльцо - бросаем сразу (0 тиков)
                             drone["hoverTimer"] = 50 if drone["targetOrder"]["deliveryType"] == "window" else 0
-                        else:
-                            drone["x"] += (dx / dist) * 2.5
-                            drone["y"] += (dy / dist) * 2.5
-                    
+
                     # Зависание у окна / сброс у подъезда
                     elif drone["status"] == "HOVERING":
                         if drone["hoverTimer"] > 0:
@@ -109,20 +142,36 @@ async def drone_telemetry(websocket: WebSocket):
                         else:
                             drone["targetOrder"]["status"] = "delivered"
                             drone["status"] = "RETURNING"
-                    
+
+                            # РАСЧЕТ МАРШРУТА ВОЗВРАТА (один раз!)
+                            start_pos = (drone["x"], drone["y"])
+                            goal_pos = (truck["x"], truck["y"])
+                            drone_navigator.set_destination(start_pos, goal_pos, speed=3.5)
+
                     # Возврат на грузовик (или аварийный возврат)
                     elif drone["status"] in ["RETURNING", "EMERGENCY_ABORT"]:
+                        # При аварийном возврате пересчитываем маршрут, если еще не сделали
+                        if drone["status"] == "EMERGENCY_ABORT" and not drone_navigator.waypoints:
+                            start_pos = (drone["x"], drone["y"])
+                            goal_pos = (truck["x"], truck["y"])
+                            drone_navigator.set_destination(start_pos, goal_pos, speed=3.5)
+
+                        current_pos = (drone["x"], drone["y"])
+                        new_x, new_y, reached = drone_navigator.update_position(current_pos)
+
+                        drone["x"], drone["y"] = new_x, new_y
+
+                        # Проверка близости к грузовику
                         dx, dy = truck["x"] - drone["x"], truck["y"] - drone["y"]
                         dist = math.hypot(dx, dy)
-                        
-                        if dist < 3.0: # Сели на грузовик
+
+                        if dist < 3.0 or reached:
                             drone["status"] = "DOCKED"
+                            drone["x"], drone["y"] = truck["x"], truck["y"]
                             if drone["targetOrder"] and drone["targetOrder"]["status"] != "delivered":
-                                drone["targetOrder"]["status"] = "pending" # Возвращаем в очередь при аварии
+                                drone["targetOrder"]["status"] = "pending"  # Возвращаем в очередь при аварии
                             drone["targetOrder"] = None
-                        else:
-                            drone["x"] += (dx / dist) * 3.5
-                            drone["y"] += (dy / dist) * 3.5
+                            drone_navigator.clear()
                     
                     # --- БАТАРЕЯ ---
                     if drone["status"] not in ["DOCKED"]:
