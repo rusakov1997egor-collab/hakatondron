@@ -103,10 +103,26 @@ async def drone_telemetry(websocket: WebSocket):
                 if state["isDeliveryActive"]:
                     truck, drone = state["truck"], state["drone"]
                     
-                    # --- ФИЗИКА ГРУЗОВИКА ---
+                    # --- ФИЗИКА ГРУЗОВИКА И ЛОГИКА ПВЗ ---
                     truck["y"] += 0.5 * truck["direction"]
-                    if truck["y"] >= 176: truck["y"], truck["direction"] = 176, -1
-                    elif truck["y"] <= 24: truck["y"], truck["direction"] = 24, 1
+
+                    # Доехали до ПВЗ (Верхняя точка)
+                    if truck["y"] >= 176: 
+                        truck["y"], truck["direction"] = 176, -1
+                        
+                        # ЛОГИКА РАЗГРУЗКИ:
+                        # Проходим по всем заказам и завершаем те, что тяжелее 2.5 кг
+                        for order in state["orders"]:
+                            if order["weight"] > 2.5 and order["status"] == "pending":
+                                order["status"] = "delivered"
+                                # Можно добавить принт в консоль для отладки
+                                print(f"Грузовик доставил тяжелый заказ {order['id']} в ПВЗ")
+
+                    # Вернулись на Склад (Нижняя точка)
+                    elif truck["y"] <= 24: 
+                        truck["y"], truck["direction"] = 24, 1
+                        # Тут можно добавить логику «загрузки» новых заказов со склада, 
+                        # если вы решите это реализовывать. Пока просто едем дальше.
 
                     # Сохраняем позицию ДО хода для расчета физики
                     old_x, old_y = drone["x"], drone["y"]
