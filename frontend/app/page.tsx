@@ -86,13 +86,12 @@ export default function App() {
     targetOrder: null as any, 
     eta: 0, 
     hoverTimer: 0,
-    // Добавляем твои физические переменные сюда:
+    // Новые поля:
     angle: 0,
     time: 0,
     distance: 0,
     remaining_time: 0
   });
-
   const ws = useRef<WebSocket | null>(null);
   const [cart, setCart] = useState<any[]>([]);
   const [selectedHouse, setSelectedHouse] = useState(HOUSES[0]);
@@ -130,14 +129,17 @@ export default function App() {
   useEffect(() => {
     ws.current = new WebSocket('ws://localhost:8000/ws/telemetry');
     ws.current.onmessage = (event) => {
-      const serverState = JSON.parse(event.data);
-      setTruck(serverState.truck);
-      setDrone(serverState.drone);
-      setOrders(serverState.orders);
-      setIsDeliveryActive(serverState.isDeliveryActive);
-      // TODO: В будущем добавить обновление ветра от сервера
-      // if (serverState.wind) setWind(serverState.wind); 
-    };
+    const serverState = JSON.parse(event.data);
+    setTruck(serverState.truck);
+    setOrders(serverState.orders);
+    setIsDeliveryActive(serverState.isDeliveryActive);
+
+    // Обновляем дрон, сохраняя старые значения, если новых нет в пакете
+    setDrone(prev => ({
+      ...prev,
+      ...serverState.drone
+    }));
+  };
     return () => { if (ws.current) ws.current.close(); };
   }, []);
 
