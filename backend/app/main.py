@@ -59,7 +59,15 @@ for house in HOUSES:
 
 current_simulation_state = {
     "truck": {"x": 100, "y": 24, "status": "moving", "direction": 1},
-    "drone": {"x": 100, "y": 24, "status": "DOCKED", "battery": 100, "eta": 0, "hoverTimer": 0, "targetOrder": None},
+    "drone": {
+        "x": 100, "y": 24, "status": "DOCKED", "battery": 100, 
+        "eta": 0, "hoverTimer": 0, "targetOrder": None,
+        # ДОБАВЛЯЕМ ТВОИ ПОЛЯ:
+        "angle": 0,
+        "time": 0,
+        "distance": 0,
+        "remaining_time": 0
+    },
     "orders": [], "isDeliveryActive": False
 }
 
@@ -95,56 +103,74 @@ async def drone_telemetry(websocket: WebSocket):
                 if state["isDeliveryActive"]:
                     truck, drone = state["truck"], state["drone"]
                     
-                    # Физика грузовика
+                    # --- ФИЗИКА ГРУЗОВИКА ---
                     truck["y"] += 0.5 * truck["direction"]
                     if truck["y"] >= 176: truck["y"], truck["direction"] = 176, -1
                     elif truck["y"] <= 24: truck["y"], truck["direction"] = 24, 1
 
+                    # Сохраняем позицию ДО хода для расчета физики
+                    old_x, old_y = drone["x"], drone["y"]
+
+                    # --- ЛОГИКА СОСТОЯНИЙ ДРОНА ---
                     if drone["status"] == "DOCKED":
                         drone["x"], drone["y"] = truck["x"], truck["y"]
+                        drone["angle"], drone["time"], drone["distance"], drone["remaining_time"] = 0, 0, 0, 0
                         drone_navigator.clear()
+                        
                         for order in reversed(state["orders"]):
                             if order["status"] == "pending" and order["assignedTo"] == "drone":
                                 order["status"], drone["targetOrder"], drone["status"] = "in_progress", order, "FLYING_OUT"
                                 drone_navigator.set_destination((drone["x"], drone["y"]), (order["house"]["x"], order["house"]["y"]), speed=2.5)
                                 break
 
-                    elif drone["status"] == "FLYING_OUT":
+                    elif drone["status"] in ["FLYING_OUT", "RETURNING", "EMERGENCY_ABORT"]:
+                        # Движение
                         drone["x"], drone["y"], reached = drone_navigator.update_position((drone["x"], drone["y"]))
+                        
+                        # ФИЗИЧЕСКИЕ РАСЧЕТЫ (Твоя часть)
+                        step_dist = math.hypot(drone["x"] - old_x, drone["y"] - old_y)
+                        drone["distance"] += step_dist
+                        drone["time"] += 0.1
+                        if step_dist > 0.01:
+                            drone["angle"] = math.degrees(math.atan2(drone["y"] - old_y, drone["x"] - old_x))
+
+                        # Проверки достижение цели
                         if reached:
-                            drone["x"], drone["y"] = drone["targetOrder"]["house"]["x"], drone["targetOrder"]["house"]["y"]
-                            drone["status"] = "HOVERING"
-                            drone["hoverTimer"] = 50 if drone["targetOrder"]["deliveryType"] == "window" else 0
+                            if drone["status"] == "FLYING_OUT":
+                                drone["x"], drone["y"] = drone["targetOrder"]["house"]["x"], drone["targetOrder"]["house"]["y"]
+                                drone["status"] = "HOVERING"
+                                drone["hoverTimer"] = 50 if drone["targetOrder"]["deliveryType"] == "window" else 0
+                            else: # Вернулся на грузовик
+                                drone["status"], drone["x"], drone["y"] = "DOCKED", truck["x"], truck["y"]
+                                if drone["targetOrder"] and drone["targetOrder"]["status"] != "delivered":
+                                    drone["targetOrder"]["status"] = "pending"
+                                drone["targetOrder"] = None
+                                drone_navigator.clear()
 
                     elif drone["status"] == "HOVERING":
-                        if drone["hoverTimer"] > 0: drone["hoverTimer"] -= 1
+                        if drone["hoverTimer"] > 0: 
+                            drone["hoverTimer"] -= 1
                         else:
                             drone["targetOrder"]["status"], drone["status"] = "delivered", "RETURNING"
                             drone_navigator.set_destination((drone["x"], drone["y"]), (truck["x"], truck["y"]), speed=3.5)
 
-                    elif drone["status"] in ["RETURNING", "EMERGENCY_ABORT"]:
-                        # УМНОЕ ВОЗВРАЩЕНИЕ: Пересчитываем путь, если грузовик уехал от конечной точки маршрута > чем на 10 юнитов
-                        if drone_navigator.waypoints:
-                            end_x, end_y = drone_navigator.waypoints[-1]
-                            if math.hypot(truck["x"] - end_x, truck["y"] - end_y) > 10.0:
-                                drone_navigator.set_destination((drone["x"], drone["y"]), (truck["x"], truck["y"]), speed=3.5)
-                        elif not drone_navigator.waypoints:
-                            drone_navigator.set_destination((drone["x"], drone["y"]), (truck["x"], truck["y"]), speed=3.5)
+                    # --- ЭНЕРГОПОТРЕБЛЕНИЕ И ПРОГНОЗ ---
+                    if drone["status"] != "DOCKED":
+                        consumption = 0.2 # Базовый расход
+                        drone["battery"] = max(0, drone["battery"] - (consumption * 0.1))
+                        drone["remaining_time"] = round((drone["battery"] / consumption) / 60, 1)
+                    else:
+                        drone["battery"] = min(100, drone["battery"] + 0.3)
+                        drone["remaining_time"] = 0
 
-                        drone["x"], drone["y"], reached = drone_navigator.update_position((drone["x"], drone["y"]))
-                        if math.hypot(truck["x"] - drone["x"], truck["y"] - drone["y"]) < 3.0 or reached:
-                            drone["status"], drone["x"], drone["y"] = "DOCKED", truck["x"], truck["y"]
-                            if drone["targetOrder"] and drone["targetOrder"]["status"] != "delivered":
-                                drone["targetOrder"]["status"] = "pending"
-                            drone["targetOrder"] = None
-                            drone_navigator.clear()
-                    
-                    # Батарея
-                    drone["battery"] = max(0, drone["battery"] - 0.1) if drone["status"] != "DOCKED" else min(100, drone["battery"] + 0.3)
+                    # Умное слежение за грузовиком при возврате
+                    if drone["status"] in ["RETURNING", "EMERGENCY_ABORT"] and drone_navigator.waypoints:
+                        end_x, end_y = drone_navigator.waypoints[-1]
+                        if math.hypot(truck["x"] - end_x, truck["y"] - end_y) > 5.0:
+                            drone_navigator.set_destination((drone["x"], drone["y"]), (truck["x"], truck["y"]), speed=3.5)
 
                 await websocket.send_json(state)
                 await asyncio.sleep(0.1)
-                
         except WebSocketDisconnect: pass
 
     await asyncio.gather(receive_commands(), send_telemetry())
