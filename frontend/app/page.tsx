@@ -79,7 +79,18 @@ export default function App() {
 
   const [truck, setTruck] = useState({ x: 100, y: 24, status: 'moving', direction: 1 });
   const [drone, setDrone] = useState({
-    x: 100, y: 24, status: 'DOCKED', battery: 100, targetOrder: null as any, eta: 0, hoverTimer: 0
+    x: 100, 
+    y: 24, 
+    status: 'DOCKED', 
+    battery: 100, 
+    targetOrder: null as any, 
+    eta: 0, 
+    hoverTimer: 0,
+    // Добавляем твои физические переменные сюда:
+    angle: 0,
+    time: 0,
+    distance: 0,
+    remaining_time: 0
   });
 
   const ws = useRef<WebSocket | null>(null);
@@ -377,10 +388,53 @@ export default function App() {
           </div>
 
           <div className="grid grid-cols-2 gap-2 text-xs font-mono mb-4">
-            <div className="bg-slate-950 p-2 rounded border border-slate-800 text-slate-400">POS: X: {(drone.x / 2).toFixed(1)} Y: {(drone.y / 2).toFixed(1)}</div>
-            <div className="bg-slate-950 p-2 rounded border border-slate-800 text-slate-400">ETA: {drone.status !== 'DOCKED' && drone.status !== 'HOVERING' ? `${drone.eta.toFixed(1)}s` : '--'}</div>
-          </div>
+            {/* Координаты */}
+            <div className="bg-slate-950 p-2 rounded border border-slate-800 text-slate-400">
+              POS: X: {(drone.x / 2).toFixed(1)} Y: {(drone.y / 2).toFixed(1)}
+            </div>
+            
+            {/* Твое время полета (берем из drone.time, которое считает бэкенд) */}
+            <div className="bg-slate-950 p-2 rounded border border-slate-800 text-slate-400">
+              FLIGHT TIME: {drone.time ? Math.floor(drone.time) : 0}s
+            </div>
 
+            {/* Угол поворота из твоей физики */}
+            <div className="bg-slate-950 p-2 rounded border border-slate-800 text-slate-400">
+              YAW: {drone.angle ? drone.angle.toFixed(1) : 0}°
+            </div>
+
+            {/* Оставшееся время (расчетное) */}
+            <div className="bg-slate-950 p-2 rounded border border-slate-800 text-cyan-500 font-bold">
+              EST. REMAINING: {drone.remaining_time ? drone.remaining_time : '--'} min
+            </div>
+
+            {/* Дистанция */}
+            <div className="bg-slate-950 p-2 rounded border border-slate-800 text-slate-400">
+              DIST: {drone.distance ? drone.distance.toFixed(1) : 0} m
+            </div>
+
+            {/* Расчетное время прибытия */}
+            <div className="bg-slate-950 p-2 rounded border border-slate-800 text-slate-400">
+              ETA: {drone.status !== 'DOCKED' && drone.status !== 'HOVERING' ? `${drone.eta?.toFixed(1)}s` : '--'}
+            </div>
+          </div>
+          {/* 2. ИНДИКАТОР ЗАРЯДА */}
+          <div className="mb-4 space-y-1">
+            <div className="flex justify-between text-[10px] font-mono text-slate-500 uppercase tracking-tighter">
+              <span>Power System</span>
+              <span className={drone.battery < 20 ? 'text-red-500 animate-pulse font-bold' : 'text-cyan-400'}>
+                {drone.battery ? drone.battery.toFixed(1) : 100}%
+              </span>
+            </div>
+            <div className="h-2 w-full bg-slate-950 rounded-full border border-slate-800 p-0.5">
+              <div 
+                className={`h-full rounded-full transition-all duration-500 ${
+                  drone.battery > 50 ? 'bg-emerald-500' : drone.battery > 20 ? 'bg-orange-500' : 'bg-red-600'
+                }`}
+                style={{ width: `${drone.battery || 100}%` }}
+              />
+            </div>
+          </div>
           {/* FPV КАМЕРА */}
           <div className="relative w-full h-32 bg-black rounded-lg border border-slate-700 overflow-hidden flex items-center justify-center">
             {drone.status === 'HOVERING' && drone.targetOrder?.deliveryType === 'window' ? (
