@@ -1,13 +1,15 @@
-import asyncio
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
-import json
+from pydantic import BaseModel
+import asyncio
+import math
+from .navigation import NavigationGrid, DroneNavigator
 
-from app.models import GestureAction, OrderMessage
-from app.state import state
-from app.physics import DronePhysicsSimulator
-
-app = FastAPI()
+app = FastAPI(
+    title="Hybrid Logistics API",
+    description="API для симуляции доставки грузовик-дрон",
+    version="1.4.0"
+)
 
 app.add_middleware(
     CORSMiddleware,
@@ -17,138 +19,132 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-clients = []
-simulator = DronePhysicsSimulator()
+# --- ПРЕПЯТСТВИЯ (ПОЛНАЯ КАРТА ИЗ ФРОНТЕНДА 45 ДОМОВ) ---
+HOUSES = [
+    {'x': 30, 'y': 40, 'width': 90, 'height': 30, 'rot': 0}, {'x': 15, 'y': 55, 'width': 30, 'height': 60, 'rot': 0},
+    {'x': 40, 'y': 85, 'width': 100, 'height': 30, 'rot': 0}, {'x': 40, 'y': 65, 'width': 30, 'height': 50, 'rot': 0},
+    {'x': 15, 'y': 85, 'width': 30, 'height': 40, 'rot': 0}, {'x': 20, 'y': 70, 'width': 30, 'height': 30, 'rot': 45},
+    {'x': 45, 'y': 135, 'width': 120, 'height': 30, 'rot': 15}, {'x': 35, 'y': 120, 'width': 30, 'height': 70, 'rot': 15},
+    {'x': 15, 'y': 140, 'width': 30, 'height': 50, 'rot': 15}, {'x': 65, 'y': 120, 'width': 30, 'height': 40, 'rot': 15},
+    {'x': 25, 'y': 155, 'width': 50, 'height': 30, 'rot': 15}, {'x': 45, 'y': 185, 'width': 100, 'height': 30, 'rot': 0},
+    {'x': 45, 'y': 165, 'width': 100, 'height': 30, 'rot': 0}, {'x': 15, 'y': 175, 'width': 30, 'height': 70, 'rot': 0},
+    {'x': 10, 'y': 190, 'width': 40, 'height': 40, 'rot': 0}, {'x': 10, 'y': 160, 'width': 40, 'height': 40, 'rot': 0},
+    {'x': 70, 'y': 175, 'width': 30, 'height': 50, 'rot': 0}, {'x': 86, 'y': 60, 'width': 25, 'height': 120, 'rot': 0},
+    {'x': 86, 'y': 100, 'width': 25, 'height': 150, 'rot': 0}, {'x': 86, 'y': 140, 'width': 25, 'height': 120, 'rot': 0},
+    {'x': 8, 'y': 110, 'width': 25, 'height': 100, 'rot': 0}, {'x': 25, 'y': 110, 'width': 60, 'height': 25, 'rot': 0},
+    {'x': 170, 'y': 40, 'width': 90, 'height': 30, 'rot': 0}, {'x': 185, 'y': 55, 'width': 30, 'height': 60, 'rot': 0},
+    {'x': 165, 'y': 105, 'width': 80, 'height': 30, 'rot': 0}, {'x': 165, 'y': 75, 'width': 80, 'height': 30, 'rot': 0},
+    {'x': 190, 'y': 90, 'width': 30, 'height': 50, 'rot': 0}, {'x': 135, 'y': 90, 'width': 30, 'height': 70, 'rot': 0},
+    {'x': 155, 'y': 140, 'width': 100, 'height': 30, 'rot': -10}, {'x': 165, 'y': 125, 'width': 30, 'height': 50, 'rot': -10},
+    {'x': 140, 'y': 155, 'width': 40, 'height': 40, 'rot': -10}, {'x': 185, 'y': 155, 'width': 30, 'height': 50, 'rot': -10},
+    {'x': 145, 'y': 185, 'width': 80, 'height': 30, 'rot': 0}, {'x': 145, 'y': 165, 'width': 80, 'height': 30, 'rot': 0},
+    {'x': 175, 'y': 175, 'width': 30, 'height': 50, 'rot': 0}, {'x': 125, 'y': 175, 'width': 30, 'height': 40, 'rot': 0},
+    {'x': 190, 'y': 185, 'width': 30, 'height': 40, 'rot': 0}, {'x': 190, 'y': 165, 'width': 30, 'height': 40, 'rot': 0},
+    {'x': 180, 'y': 70, 'width': 40, 'height': 40, 'rot': -45}, {'x': 130, 'y': 95, 'width': 30, 'height': 60, 'rot': 0},
+    {'x': 114, 'y': 60, 'width': 25, 'height': 120, 'rot': 0}, {'x': 114, 'y': 100, 'width': 25, 'height': 150, 'rot': 0},
+    {'x': 114, 'y': 140, 'width': 25, 'height': 120, 'rot': 0}, {'x': 195, 'y': 110, 'width': 25, 'height': 100, 'rot': 0},
+    {'x': 175, 'y': 110, 'width': 60, 'height': 25, 'rot': 0}
+]
+
+# Уменьшаем cell_size для более точной навигации
+nav_grid = NavigationGrid(width=200, height=200, cell_size=2)
+for house in HOUSES:
+    # Безопасное извлечение ключей (w/width, h/height), чтобы не было ошибок
+    w = house.get("width", house.get("w", 20))
+    h = house.get("height", house.get("h", 20))
+    rot = house.get("rot", 0)
+    
+    # Добавляем препятствие с отступом 2.0
+    nav_grid.add_obstacle(house["x"], house["y"], w, h, rot=rot, safety_margin=1.0)
+
+current_simulation_state = {
+    "truck": {"x": 100, "y": 24, "status": "moving", "direction": 1},
+    "drone": {"x": 100, "y": 24, "status": "DOCKED", "battery": 100, "eta": 0, "hoverTimer": 0, "targetOrder": None},
+    "orders": [], "isDeliveryActive": False
+}
+
+class GestureRequest(BaseModel):
+    action: str
 
 @app.post("/api/gesture")
-async def receive_gesture(gesture: GestureAction):
-    """Эндпоинт для приема сигнала от компьютерного зрения (MediaPipe)"""
-    drone = state["drone"]
-    
-    if gesture.action == "come_here":
-        # Если дрон висел в ожидании, разрешаем посадку/сброс
-        if drone["status"] == "HOVERING":
-            drone["hoverTimer"] = 0 # Сбрасываем таймер ожидания
-            print("[API] Жест принят: Завершение доставки!")
-            
-    elif gesture.action == "abort":
-        # Экстренное прерывание миссии
-        if drone["status"] in ["FLYING_OUT", "HOVERING"]:
-            drone["status"] = "EMERGENCY_ABORT"
-            drone["hoverTimer"] = 0
-            # Возвращаем заказ в очередь
-            if drone["targetOrder"]:
-                for o in state["orders"]:
-                    if o["id"] == drone["targetOrder"]["id"]:
-                        o["status"] = "pending"
-            print("[API] Жест принят: ЭКСТРЕННАЯ ОТМЕНА!")
-            
-    return {"status": "accepted"}
+async def handle_gesture(gesture: GestureRequest):
+    global current_simulation_state
+    if gesture.action == "abort":
+        current_simulation_state["drone"]["status"] = "EMERGENCY_ABORT"
+        return {"status": "aborted"}
+    return {"status": "ok"}
 
 @app.websocket("/ws/telemetry")
-async def websocket_endpoint(websocket: WebSocket):
-    """Связь с фронтендом (Next.js)"""
+async def drone_telemetry(websocket: WebSocket):
     await websocket.accept()
-    clients.append(websocket)
-    try:
-        while True:
-            data = await websocket.receive_text()
-            msg = OrderMessage.parse_raw(data)
-            
-            if msg.type == "NEW_ORDER" and msg.order:
-                state["orders"].append(msg.order)
-            elif msg.type == "TOGGLE_DELIVERY":
-                state["isDeliveryActive"] = not state["isDeliveryActive"]
-                
-    except WebSocketDisconnect:
-        clients.remove(websocket)
-
-async def simulation_loop():
-    """Главный цикл симуляции (Game Loop) - 10 FPS"""
-    dt = 0.1 
-    truck_speed = 10.0 # Скорость грузовика
+    global current_simulation_state
+    drone_navigator = DroneNavigator(nav_grid)
     
-    while True:
-        if state["isDeliveryActive"]:
-            # --- 1. Движение грузовика ---
-            truck = state["truck"]
-            truck["y"] += truck_speed * truck["direction"] * dt
-            if truck["y"] >= 176: 
-                truck["y"] = 176
-                truck["direction"] = -1
-            if truck["y"] <= 24: 
-                truck["y"] = 24
-                truck["direction"] = 1
+    async def receive_commands():
+        try:
+            while True:
+                data = await websocket.receive_json()
+                if data.get("type") == "NEW_ORDER": current_simulation_state["orders"].append(data["order"])
+                elif data.get("type") == "TOGGLE_DELIVERY": current_simulation_state["isDeliveryActive"] = not current_simulation_state["isDeliveryActive"]
+        except WebSocketDisconnect: pass
 
-            # --- 2. Логика и физика Дрона ---
-            drone = state["drone"]
-            orders = state["orders"]
-            
-            if drone["status"] == "DOCKED":
-                drone["x"] = truck["x"]
-                drone["y"] = truck["y"]
-                if drone["battery"] < 100:
-                    drone["battery"] = min(100.0, drone["battery"] + 2.0) # Быстрая зарядка
-                
-                # Поиск заказа для дрона
-                pending_order = next((o for o in orders if o["status"] == "pending" and o["assignedTo"] == "drone"), None)
-                if pending_order and drone["battery"] > 30:
-                    drone["targetOrder"] = pending_order
-                    drone["status"] = "FLYING_OUT"
-                    pending_order["status"] = "in_progress"
-            
-            else:
-                # Определение цели
-                target_pos = {"x": truck["x"], "y": truck["y"]} # По умолчанию летим на грузовик
-                if drone["status"] == "FLYING_OUT" and drone["targetOrder"]:
-                    target_pos = {"x": drone["targetOrder"]["house"]["x"], "y": drone["targetOrder"]["house"]["y"]}
-                
-                # Физический тик
-                is_hovering = drone["status"] == "HOVERING"
-                physics_result = simulator.tick(
-                    payload_weight=drone["targetOrder"]["weight"] if drone["targetOrder"] else 0.0,
-                    current_battery_pct=drone["battery"],
-                    flight_mode="HOVER" if is_hovering else "CRUISE",
-                    target_pos=target_pos,
-                    current_pos={"x": drone["x"], "y": drone["y"]},
-                    dt=dt
-                )
-                
-                # Применяем новые данные
-                drone["battery"] = physics_result["battery"]
-                drone["x"] = physics_result["x"]
-                drone["y"] = physics_result["y"]
-                drone["eta"] = physics_result["distance_to_target"] / 25.0
-
-                # Логика смены состояний
-                if physics_result["distance_to_target"] < 2.0:
-                    if drone["status"] == "FLYING_OUT":
-                        drone["status"] = "HOVERING"
-                        drone["hoverTimer"] = 6.0 if drone["targetOrder"]["deliveryType"] == 'window' else 3.0
+    async def send_telemetry():
+        try:
+            while True:
+                state = current_simulation_state
+                if state["isDeliveryActive"]:
+                    truck, drone = state["truck"], state["drone"]
                     
+                    # Физика грузовика
+                    truck["y"] += 0.5 * truck["direction"]
+                    if truck["y"] >= 176: truck["y"], truck["direction"] = 176, -1
+                    elif truck["y"] <= 24: truck["y"], truck["direction"] = 24, 1
+
+                    if drone["status"] == "DOCKED":
+                        drone["x"], drone["y"] = truck["x"], truck["y"]
+                        drone_navigator.clear()
+                        for order in reversed(state["orders"]):
+                            if order["status"] == "pending" and order["assignedTo"] == "drone":
+                                order["status"], drone["targetOrder"], drone["status"] = "in_progress", order, "FLYING_OUT"
+                                drone_navigator.set_destination((drone["x"], drone["y"]), (order["house"]["x"], order["house"]["y"]), speed=2.5)
+                                break
+
+                    elif drone["status"] == "FLYING_OUT":
+                        drone["x"], drone["y"], reached = drone_navigator.update_position((drone["x"], drone["y"]))
+                        if reached:
+                            drone["x"], drone["y"] = drone["targetOrder"]["house"]["x"], drone["targetOrder"]["house"]["y"]
+                            drone["status"] = "HOVERING"
+                            drone["hoverTimer"] = 50 if drone["targetOrder"]["deliveryType"] == "window" else 0
+
+                    elif drone["status"] == "HOVERING":
+                        if drone["hoverTimer"] > 0: drone["hoverTimer"] -= 1
+                        else:
+                            drone["targetOrder"]["status"], drone["status"] = "delivered", "RETURNING"
+                            drone_navigator.set_destination((drone["x"], drone["y"]), (truck["x"], truck["y"]), speed=3.5)
+
                     elif drone["status"] in ["RETURNING", "EMERGENCY_ABORT"]:
-                        drone["status"] = "DOCKED"
-                        drone["targetOrder"] = None
-                
-                # Логика зависания (у клиента)
-                if drone["status"] == "HOVERING":
-                    drone["hoverTimer"] -= dt
-                    if drone["hoverTimer"] <= 0:
-                        # Заказ доставлен
-                        if drone["targetOrder"]:
-                            drone["targetOrder"]["status"] = "delivered"
-                        drone["status"] = "RETURNING"
-                        drone["targetOrder"] = None
+                        # УМНОЕ ВОЗВРАЩЕНИЕ: Пересчитываем путь, если грузовик уехал от конечной точки маршрута > чем на 10 юнитов
+                        if drone_navigator.waypoints:
+                            end_x, end_y = drone_navigator.waypoints[-1]
+                            if math.hypot(truck["x"] - end_x, truck["y"] - end_y) > 10.0:
+                                drone_navigator.set_destination((drone["x"], drone["y"]), (truck["x"], truck["y"]), speed=3.5)
+                        elif not drone_navigator.waypoints:
+                            drone_navigator.set_destination((drone["x"], drone["y"]), (truck["x"], truck["y"]), speed=3.5)
 
-        # --- 3. Рассылка стейта всем клиентам ---
-        for client in clients:
-            try:
-                await client.send_json(state)
-            except:
-                pass
-                
-        await asyncio.sleep(dt)
+                        drone["x"], drone["y"], reached = drone_navigator.update_position((drone["x"], drone["y"]))
+                        if math.hypot(truck["x"] - drone["x"], truck["y"] - drone["y"]) < 3.0 or reached:
+                            drone["status"], drone["x"], drone["y"] = "DOCKED", truck["x"], truck["y"]
+                            if drone["targetOrder"] and drone["targetOrder"]["status"] != "delivered":
+                                drone["targetOrder"]["status"] = "pending"
+                            drone["targetOrder"] = None
+                            drone_navigator.clear()
+                    
+                    # Батарея
+                    drone["battery"] = max(0, drone["battery"] - 0.1) if drone["status"] != "DOCKED" else min(100, drone["battery"] + 0.3)
 
-@app.on_event("startup")
-async def startup_event():
-    asyncio.create_task(simulation_loop())
+                await websocket.send_json(state)
+                await asyncio.sleep(0.1)
+                
+        except WebSocketDisconnect: pass
+
+    await asyncio.gather(receive_commands(), send_telemetry())
