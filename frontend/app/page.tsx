@@ -296,7 +296,23 @@ export default function App() {
         <div className="absolute top-0 bottom-0 left-1/2 w-10 -ml-5 bg-[#1e3a8a] flex justify-center shadow-[0_0_15px_rgba(30,58,138,0.2)]">
           <div className="w-1 h-full border-l-[3px] border-dashed border-white/40"></div>
         </div>
+        {/* СКЛАД (НИЗ ДОРОГИ) */}
+        <div className="absolute z-20 flex flex-col items-center" 
+            style={{ left: '50%', bottom: '12%', transform: 'translate(-50%, 50%)' }}>
+          <div className="bg-slate-900 border-2 border-orange-500 p-2 rounded-lg shadow-[0_0_15px_rgba(249,115,22,0.4)]">
+            <Home size={24} className="text-orange-500" />
+          </div>
+          <span className="mt-1 text-[10px] font-bold text-slate-800 bg-orange-100 px-1 rounded">СКЛАД</span>
+        </div>
 
+        {/* ПВЗ (ВЕРХ ДОРОГИ) */}
+        <div className="absolute z-20 flex flex-col items-center" 
+            style={{ left: '50%', bottom: '88%', transform: 'translate(-50%, 50%)' }}>
+          <div className="bg-slate-900 border-2 border-emerald-500 p-2 rounded-lg shadow-[0_0_15px_rgba(16,185,129,0.4)]">
+            <Package size={24} className="text-emerald-500" />
+          </div>
+          <span className="mt-1 text-[10px] font-bold text-slate-800 bg-emerald-100 px-1 rounded">ПВЗ (DROP-OFF)</span>
+        </div>
         {HOUSES.map(h => (
           <div key={h.id} className="absolute bg-[#e11d48] border-4 border-[#be123c] rounded shadow-2xl flex flex-col items-center justify-center text-white/40 font-bold overflow-hidden"
             style={{ left: `${h.x / 2}%`, bottom: `${h.y / 2}%`, width: `${h.w}px`, height: `${h.h}px`, transform: `translate(-50%, 50%) rotate(${h.rot}deg)` }}>
